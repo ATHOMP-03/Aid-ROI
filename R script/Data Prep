@@ -1,0 +1,502 @@
+#Load datasets into R Studio
+aid_df = read_csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/us_foreign_aid_complete.csv")
+fdi_df_raw = read_csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/fdi.csv")
+gdp = read_csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/gdp.csv")
+
+rm(list = setdiff(ls(), "aid_df"))
+#dji, usd, gdp and fdi all added directly
+
+#data clean up.  Things need to be uniformly in "long format" for analysis. 
+install.packages("janitor")
+library(janitor)
+
+fdi_df_raw = read_csv(fdi, skip = 0, col_names = FALSE)
+
+# Promote first two rows to column names
+fdi_df = fdi_df_raw %>%
+  row_to_names(row_number = 2)
+
+# Clean column names to be unique and machine-friendly
+fdi_df = janitor::clean_names(fdi_df)
+
+fdi_df_raw = read_csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/fdi.csv")
+
+# Extract the first two rows to build proper column names
+headers = fdi_df_raw[1, ] %>% unlist() %>% as.character()
+years   = fdi_df_raw[2, ] %>% unlist() %>% as.character()
+
+# Fill in the first column name (e.g., "country")
+headers[1] = "country"
+years[1] = ""  # no year associated with country name
+
+# Combine sector and year into column names
+combined_names = ifelse(years == "", headers, paste0(headers, "_", years))
+
+# Drop the two header rows and set the new names
+fdi_clean = fdi_df_raw[-c(1,2), ]
+names(fdi_clean) = combined_names
+mutate(fdi_value = as.numeric(unlist(fdi)))
+
+
+fdi_long = fdi_clean %>%
+  pivot_longer(
+    cols = -country,
+    names_to = c("sector", "year"),
+    names_sep = "_",
+    values_to = "fdi_value"
+  ) %>%
+  mutate(
+    year = as.integer(year),
+    sector = str_to_title(sector),
+    fdi_value = as.numeric(fdi_value)
+  )
+
+fdi_long = fdi_long %>%
+  mutate(fdi_value = as.numeric(fdi))
+
+fdi_total = fdi_long %>%
+  group_by(country, year) %>%
+  summarise(
+    fdi = sum(fdi_value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+fdi_long %>%
+  filter(!is.na(fdi_value) & is.na(as.numeric(fdi_value))) %>%
+  distinct(fdi_value)
+
+
+# Create a new dataset that has only disbursed amounts from USAID.
+aid_totals = aid_df %>%
+  filter(`Transaction Type Name` == "Disbursements")
+
+aid_summary = aid_totals %>%
+  group_by(
+    country = `Country Name`,
+    year = `Fiscal Year`,
+    regionID = `Region ID`,
+    region = `Region Name`,
+    income = `Income Group ID`,
+    income_group = `Income Group Name`
+  ) %>%
+  summarise(
+    aid_amount = sum(`Current Dollar Amount`, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Merge aid and FDI data
+fdi_and_aid = full_join(aid_summary, fdi_total, by = c("country", "year"))
+
+# Starting merged DF as a master location for data formatting.  I'll pull a matrix of covariates out later.
+merged_df = fdi_and_aid
+
+
+# Getting US GDP data ready and adding to merged_df
+gdp = gdp %>%
+  rename(year = observation_date)
+
+gdp = gdp %>%
+  rename(usgdp = GDPA)
+
+merged_df = merged_df %>%
+  left_join(gdp, by = "year")
+
+# World GDP data by year
+gdp_all = read.csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/world_gdp.csv")
+
+
+gdp_all = gdp_all %>%
+  select(-Series.Name, -Series.Code, -Country.Code)
+
+gdp_all = gdp_all %>%
+  rename(country = Country.Name)
+
+gdp_all = gdp_all %>%
+  rename_with(
+    ~ str_extract(., pattern = "[0-9]{4}"),  # grab 4-digit year only
+    .cols = where(is.numeric)               # only apply to numeric columns (the years)
+  )
+
+names(gdp_all)
+
+gdp_all = gdp_all %>%
+  rename_with(
+    .fn = ~ str_extract(., "\\d{4}"),    # Extract the 4-digit year
+    .cols = -country                     # Apply to all columns *except* "country"
+  )
+
+small_countries = c("American Samoa", "British Virgin Islands", "Cayman Islands", "Channel Islands", "Gibraltar", "Guam", 
+                    "Korea, Dem. People's Rep.", "Northern Mariana Islands", "Sint Maarten (Dutch part)", "St. Martin (French part)"
+                     )
+gdp_all = gdp_all %>%
+  filter(!country %in% small_countries)
+
+gdp_all = gdp_all %>%
+  select(country, `1997`:`2024`)
+# At this point GDP has been cleaned so we have all countries from 1997 to 2024. 
+# Now I need to impute missing values.  
+# The algorithms tell me I need to move my data to long format. So I'll pivot it first. 
+
+gdp_long = gdp_all %>%
+  pivot_longer(
+    cols = -1,                     # because the first column is country
+    names_to = "year",
+    values_to = "gdp"
+  ) %>%
+  rename(country = 1) %>%         # This enusres our first row stays "country"... in case it wasn't already 
+  mutate(
+    year = as.integer(year),
+    gdp = as.numeric(gdp)
+  )
+
+#Now to impute missing values
+
+log_linear_impute = function(data, unit_col, time_col, value_col) {
+  library(dplyr)
+  library(zoo)
+  library(rlang)
+  
+  unit_sym = sym(unit_col)
+  time_sym = sym(time_col)
+  value_sym = sym(value_col)
+  
+  data %>%
+    filter(!is.na(!!unit_sym) & !!unit_sym != "") %>%   # 🚫 filter out blank country rows
+    arrange(!!unit_sym, !!time_sym) %>%
+    group_by(!!unit_sym) %>%
+    mutate(
+      log_val = log(!!value_sym),
+      log_val = na.approx(log_val, x = !!time_sym, na.rm = FALSE),
+      log_val = na.locf(log_val, na.rm = FALSE),
+      log_val = na.locf(log_val, fromLast = TRUE, na.rm = FALSE),
+      !!value_col := exp(log_val)
+    ) %>%
+    select(-log_val) %>%
+    ungroup()
+}
+
+imputed_gdp = log_linear_impute(gdp_long, unit_col = "country", time_col = "year", value_col = "gdp")
+#Separating out US GDP as its own data, so I can use it to correct for endogenous GDP growth later
+us_gdp = imputed_gdp %>%
+  filter(country == "United States") %>%
+  select(year, us_gdp = gdp)
+
+gdp_by_country = imputed_gdp %>%
+  filter(country != "United States") %>%
+  rename(country_gdp = gdp)
+
+gdp_by_country = gdp_by_country %>%
+  mutate(country = case_when(
+    country == "Bahamas, The" ~ "Bahamas",
+    country == "Brunei Darussalam" ~ "Brunei",
+    country == "Myanmar" ~ "Burma (Myanmar)",
+    country == "Congo, Rep." ~ "Republic of the Congo",
+    country == "Congo, Dem. Rep." ~ "Democratic Republic of the Congo", 
+    country == "Egypt, Arab Rep." ~ "Egypt",
+    country == "Gambia, The" ~ "Gambia",
+    country == "Hong Kong SAR, China" ~ "Hong Kong",
+    country == "Iran, Islamic Rep." ~ "Iran",
+    country == "Kiribati" ~ "Kiribati, Republic of",
+    country == "Korea, Rep." ~ "Korea, Republic of",
+    country == "Kyrgyz Republic" ~ "Kyrgyzstan",
+    country == "Lao PDR" ~ "Laos",
+    country == "Micronesia, Fed. Sts." ~ "Micronesia, Federated States of",
+    country == "Russian Federation" ~ "Russia",
+    country == "St. Vincent and the Grenadines" ~ "St. Vincent and Grenadines",
+    country == "Syrian Arab Republic" ~ "Syria",
+    country == "Turkiye" ~ "Turkey",
+    country == "Venezuela, RB" ~ "Venezuela",
+    country == "Viet Nam" ~ "Vietnam",
+    country == "Yemen, Rep." ~ "Yemen",
+    TRUE ~ country
+  ))
+
+# Confirm both country columns are cleaned the same way and both are the same type "string" or "integer"
+unique(merged_df$country)
+unique(gdp_by_country$country)
+
+str(merged_df$year)
+str(gdp_by_country$year)
+
+gdp_by_country = gdp_by_country %>%
+  mutate(year = as.integer(year))
+
+anti_join(merged_df, gdp_by_country, by = c("country", "year"))
+
+
+# Merging data into merged df
+
+merged_df = merged_df %>%
+  left_join(us_gdp, by = "year")
+
+merged_df = merged_df %>%
+  select(-usgdp)
+
+merged_df = merged_df %>%
+  left_join(gdp_by_country, by = c("country", "year"))
+
+merged_df = merged_df %>%
+  select(-country_gdp.x) %>%
+  rename(country_gdp = country_gdp.y)
+
+merged_df = merged_df %>%
+  filter(country != "Anguilla")
+
+merged_df %>%
+  filter(is.na(country_gdp)) %>%
+  distinct(country)
+
+# Trimming off 2025 from the data since I don't have GDP or FDI for that year
+merged_df = merged_df %>%
+  filter(year <= 2024)
+
+merged_df %>%
+  filter(is.na(country_gdp)) %>%
+  distinct(country)
+
+regions_to_drop = c("Asia, Middle East and North Africa Region",
+                    "British Indian Ocean Territory", 
+                    "Caribbean Region",
+                    "Central America and Caribbean Region", 
+                    "Central and Eastern Europe Region", 
+                    "China (Macau, S.A.R., P.R.C.)", 
+                    "East Asia and Oceania Region", 
+                    "Eastern Africa Region", 
+                    "Eastern Asia Region",
+                    "Eastern Europe Region", 
+                    "Eastern and Central Africa Region", 
+                    "Eurasia Region", 
+                    "Europe and Eurasia Region", 
+                    "French Guiana", 
+                    "French Polynesia", 
+                    "Latin America Region", 
+                    "Latin America and Caribbean Region", 
+                    "Martinique", 
+                    "Middle East Region", 
+                    "Middle East and North Africa Region", 
+                    "Montserrat", 
+                    "Netherlands Antilles (former)", 
+                    "North Africa Region",
+                    "North America Region", 
+                    "North and Central America Region",
+                    "Oceania Region", 
+                    "Pacific Island Trust Territory", 
+                    "South America Region", 
+                    "South East Asia Region", 
+                    "South and Central Asia Region", 
+                    "Southern Africa Region", 
+                    "Southern Asia Region", 
+                    "Sub-Saharan Africa Region", 
+                    "Sudan (former)", 
+                    "West Africa Region", 
+                    "Western Europe Region", 
+                    "Western Hemisphere Region", 
+                    "World", 
+                    "Addenda:", 
+                    "Africa", 
+                    "All Countries Total[1]", 
+                    "Asia and Pacific", 
+                    "Europe", 
+                    "European Union[5]", 
+                    "Latin America and Other Western Hemisphere", 
+                    "Middle East", 
+                    "Netherlands Antilles[3]", 
+                    "OPEC[6]", 
+                    "Other", 
+                    "Other Western Hemisphere", 
+                    "South and Central America", 
+                    "United Kingdom Islands, Caribbean[4]"
+                      )
+
+merged_df = merged_df %>%
+  filter(!country %in% regions_to_drop)
+
+# Add dummy variables for treaty status (separated into military, bilateral investment, and trade treaties)
+trade_agreements = read.csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/trade_agreements.csv")
+
+trade_summary = trade_agreements %>%
+  group_by(country, year) %>%
+  summarise(trade_treaties = n(), .groups = "drop")
+
+defense_agreements = read.csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/mil_treaties.csv")
+
+defense_summary = defense_agreements %>%
+  group_by(country, year) %>%
+  summarise(defense_treaties = n(), .groups = "drop")
+
+bit_list = read.csv("/Users/ashleythompson/Desktop/Foreign Aid ROI/Data/bilat_investment.csv")
+
+bit_summary = defense_agreements %>%
+  group_by(country, year) %>%
+  summarise(bit_count = n(), .groups = "drop")
+
+merged_df = merged_df %>%
+  left_join(trade_summary, by = c("country", "year")) %>%
+  left_join(defense_summary, by = c("country", "year")) %>%
+  left_join(bit_summary, by = c("country", "year"))
+
+merged_df = merged_df %>%
+  mutate(
+    trade_treaties = replace_na(trade_treaties, 0),
+    defense_treaties = replace_na(defense_treaties, 0),
+    investment_treaties = replace_na(bit_count, 0)
+  )
+
+merged_df = merged_df %>%
+  select(-bit_count)
+
+merged_df = merged_df %>%
+  filter(!country %in% c("Asia Region",
+                         "British Virgin Islands",
+                         "Central America Region",
+                         "Cook Islands",
+                         "East and South Africa Region",
+                         "Europe Region",
+                         "Luxembourg",
+                         "United States"))
+
+# Now I need to merge redundant rows
+merged_df = merged_df %>%
+  mutate(country = case_when(
+    country %in% c("China (P.R.C.)", "China (Tibet)") ~ "China",
+    country == "China (Hong Kong, S.A.R., P.R.C.)" ~ "Hong Kong",
+    country == "Congo (Brazzaville)" ~ "Republic of the Congo",
+    country == "Congo (Kinshasa)" ~ "Democratic Republic of the Congo", 
+    country == "Czechoslovakia (former)" ~ "Czechia",
+    country == "Serbia and Montenegro (former)" ~ "Serbia",
+    country == "Curacao[2]" ~ "Curacao",
+    TRUE ~ country
+  ))
+# Merging and summarizing rows
+merged_df = merged_df %>%
+  group_by(country, year) %>%
+  summarise(
+    aid_amount = sum(aid_amount, na.rm = TRUE),
+    fdi = sum(fdi, na.rm = TRUE),
+    
+    country_gdp = first(country_gdp),
+    us_gdp = first(us_gdp),
+    trade_treaties = first(trade_treaties),
+    defense_treaties = first(defense_treaties),
+    investment_treaties = first(investment_treaties),
+    
+    .groups = "drop"
+  )
+
+
+# Step 1: Extract South Korea values
+south_korea_data = merged_df %>%
+  filter(country == "South Korea") %>%
+  select(year, fdi, defense_treaties, investment_treaties)
+
+# Step 2: Add South Korea values to Korea, Republic of
+merged_df = merged_df %>%
+  left_join(south_korea_data, by = "year", suffix = c("", "_sk")) %>%
+  mutate(
+    fdi = if_else(country == "Korea, Republic of", fdi + coalesce(fdi_sk, 0), fdi),
+    defense_treaties = if_else(country == "Korea, Republic of", defense_treaties + coalesce(defense_treaties_sk, 0), defense_treaties),
+    investment_treaties = if_else(country == "Korea, Republic of", investment_treaties + coalesce(investment_treaties_sk, 0), investment_treaties)
+  ) %>%
+  select(-fdi_sk, -defense_treaties_sk, -investment_treaties_sk)
+
+# Step 3: Drop South Korea rows
+merged_df = merged_df %>%
+  filter(country != "South Korea")
+
+merged_df %>%
+  filter(is.na(country_gdp)) %>%
+  distinct(country)
+
+merged_df = merged_df %>%
+  filter(!country %in% c("Cayman Islands", "Korea, Democratic Republic of", "Taiwan"))
+
+#Checking for NAs in the data
+colSums(is.na(merged_df))
+merged_df %>%
+  filter(if_any(everything(), is.na))
+
+#Fixing remaining NAs for country info
+merged_df = merged_df %>%
+  mutate(income = as.numeric(income)) %>%
+  mutate(
+    regionID = case_when(
+      country == "China" ~ 1,
+      country == "Democratic Republic of the Congo" ~ 5,
+      country == "Hong Kong" ~ 1,
+      country == "Liechtenstein" ~ 2,
+      country == "Republic of the Congo" ~ 5,
+      TRUE ~ regionID
+    ),
+    region = case_when(
+      country == "China" ~ "East Asia and Oceania",
+      country == "Democratic Republic of the Congo" ~ "Sub-Saharan Africa",
+      country == "Hong Kong" ~ "East Asia and Oceania",
+      country == "Liechtenstein" ~ "Europe and Eurasia",
+      country == "Republic of the Congo" ~ "Sub-Saharan Africa",
+      TRUE ~ region
+    ),
+    income = case_when(
+      country == "China" ~ 3,
+      country == "Democratic Republic of the Congo" ~ 1,
+      country == "Hong Kong" ~ 4,
+      country == "Liechtenstein" ~ 4,
+      country == "Republic of the Congo" ~ 2,
+      TRUE ~ income
+    ),
+    income_group = case_when(
+      country == "China" ~ "Upper Middle Income Country",
+      country == "Democratic Republic of the Congo" ~ "Low Income Country",
+      country == "Hong Kong" ~ "High Income Country",
+      country == "Liechtenstein" ~ "High Income Country",
+      country == "Republic of the Congo" ~ "Lower Middle Income Country",
+      TRUE ~ income_group
+    )
+  )
+
+merged_df %>%
+  filter(if_any(everything(), is.na))
+
+
+#Somehow dropped region ID and country economic development code. Re-adding.  
+#Also setting everything up in dollars instead of thousands, millions, etc.  That way my tau is measurable in USD.
+region_income_info = aid_summary %>%
+  select(country, year, 
+         regionID, 
+         region, 
+         income, 
+         income_group) %>%
+  distinct() %>%
+  group_by(country, year) %>%
+  summarise(
+    regionID = first(regionID),
+    region = first(region),
+    income = first(income),
+    income_group = first(income_group),
+    .groups = "drop"
+  )
+
+merged_df = merged_df %>%
+  left_join(region_income_info, by = c("country", "year"))
+
+#Now to convert FDI to Single dollar amounts. 
+merged_df = merged_df %>%
+  mutate(fdi = fdi * 1000)
+
+
+# Now to set treatment status as received or didn't receive aid.  
+treatment_df = merged_df %>%
+  filter(aid_amount >= 0)
+
+treatment_df = treatment_df %>%
+  mutate(treated = if_else(aid_amount > 0, 1, 0))
+
+merged_df = merged_df %>%
+  group_by(country) %>%
+  fill(region, regionID, income, income_group, .direction = "downup") %>%
+  ungroup()
+
+treatment_df = treatment_df %>%
+  group_by(country) %>%
+  fill(regionID, region, income, income_group, .direction = "downup") %>%
+  ungroup()
