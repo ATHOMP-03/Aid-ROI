@@ -1,0 +1,134 @@
+install.packages("gt")
+install.packages("webshot2")  # Needed to save as image
+webshot::install_webshot()    # Run this once to enable saving screenshots
+
+library(dplyr)
+library(gt)
+
+# Create summary table
+summary_table = treatment_df %>%
+  select(treated, fdi, pscore, mu1, mu0, aipw, country_gdp, us_gdp, dji) %>%
+  summarise_all(~c(mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>%
+  t() %>% as.data.frame() %>%
+  rename(Mean = V1, SD = V2) %>%
+  rownames_to_column("Variable") %>%
+  gt()
+
+# Export as image
+gtsave(summary_table, "aipw_summary_table.png")
+
+# Or export as PDF
+gtsave(summary_table, "aipw_summary_table.pdf")
+
+balance_table = treatment_df %>%
+  group_by(treated) %>%
+  summarise(
+    country_gdp = mean(country_gdp, na.rm = TRUE),
+    us_gdp = mean(us_gdp, na.rm = TRUE),
+    dji = mean(dji, na.rm = TRUE),
+    trade = mean(trade_treaties, na.rm = TRUE),
+    defense = mean(defense_treaties, na.rm = TRUE),
+    investment = mean(investment_treaties, na.rm = TRUE)
+  ) %>%
+  gt()
+
+# Export balance table
+gtsave(balance_table, "balance_table.png")
+
+
+library(ggplot2)
+
+ps_plot = ggplot(treatment_df, aes(x = pscore, fill = factor(treated))) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Propensity Score Distribution",
+    x = "Propensity Score",
+    fill = "Treated"
+  ) +
+  theme_minimal()
+
+# Save as PNG
+ggsave("pscore_distribution.png", ps_plot, width = 8, height = 6)
+
+# Or PDF
+ggsave("pscore_distribution.pdf", ps_plot, width = 8, height = 6)
+
+
+
+
+
+
+
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(patchwork)
+
+
+# --- 1. Summary Statistics Table ---
+summary_table = treatment_df %>%
+  select(treated, fdi, pscore, mu1, mu0, aipw, country_gdp, us_gdp, dji) %>%
+  summarise_all(~c(mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>%
+  t() %>% as.data.frame() %>%
+  rename(Mean = V1, SD = V2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Generate GT table without `title =` in gt()
+gt_summary = summary_table %>%
+  gt() %>%
+  tab_header(
+    title = "Summary Statistics for AIPW Variables"
+  )
+
+
+# --- 2. Balance Table ---
+balance_table = treatment_df %>%
+  group_by(treated) %>%
+  summarise(
+    country_gdp = mean(country_gdp, na.rm = TRUE),
+    us_gdp = mean(us_gdp, na.rm = TRUE),
+    dji = mean(dji, na.rm = TRUE),
+    trade = mean(trade_treaties, na.rm = TRUE),
+    defense = mean(defense_treaties, na.rm = TRUE),
+    investment = mean(investment_treaties, na.rm = TRUE)
+  )
+
+
+gt_balance = balance_table %>%
+  gt() %>%
+  tab_header(title = "Balance Table by Treatment Status")
+
+
+# --- 3. Propensity Score Plot ---
+ps_plot = ggplot(treatment_df, aes(x = pscore, fill = factor(treated))) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Propensity Score Distribution",
+    x = "Propensity Score",
+    fill = "Treated"
+  ) +
+  theme_minimal()
+
+
+# --- Export all into a single PDF ---
+# Save plots as temporary images
+gtsave(gt_summary, "summary_table.png")
+gtsave(gt_balance, "balance_table.png")
+ggsave("pscore_plot.png", ps_plot, width = 8, height = 5)
+
+
+# Combine and export to single PDF
+summary_img = png::readPNG("summary_table.png")
+balance_img = png::readPNG("balance_table.png")
+pscore_img = png::readPNG("pscore_plot.png")
+
+
+# Create grobs
+g1 = rasterGrob(summary_img, interpolate = TRUE)
+g2 = rasterGrob(balance_img, interpolate = TRUE)
+g3 = rasterGrob(pscore_img, interpolate = TRUE)
+
+
+# Export to PDF
+pdf("aipw_outputs_summary.pdf", width = 11, height = 14)
+grid.arrange(g1, g2, g3, ncol = 1, heights = c(1.2, 1.2, 1))
