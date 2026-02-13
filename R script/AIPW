@@ -1,0 +1,42 @@
+# Propensity score
+# First make sure region and income are treated as factors, not continuous variables.
+treatment_df = treatment_df %>%
+  mutate(
+    regionID = as.factor(regionID),
+    income = as.factor(income)
+  )
+
+prop_model = glm(treated ~ country_gdp + us_gdp + 
+    trade_treaties + defense_treaties + investment_treaties + 
+    regionID + income,
+  data = treatment_df,
+  family = binomial
+)
+
+
+# Outcome model:
+outcome_model = lm(fdi ~ 
+                     treated + 
+                     country_gdp + us_gdp + 
+                     region + income_group + 
+                     trade_treaties + defense_treaties + investment_treaties,
+                   data = treatment_df)
+
+# Create predicted treatment and controls...
+# Propensity scores (predicted probabilities of being treated)
+treatment_df$pscore = predict(prop_model, type = "response")
+
+# Predicted outcomes under treatment and control
+treatment_df$mu1 = predict(outcome_model, newdata = treatment_df %>% mutate(treated = 1))
+treatment_df$mu0 = predict(outcome_model, newdata = treatment_df %>% mutate(treated = 0))
+
+# AIPW estimation
+treatment_df = treatment_df %>%
+  mutate(
+    aipw = treated * (fdi - mu1) / pscore +
+      (1 - treated) * (fdi - mu0) / (1 - pscore) +
+      mu1 - mu0
+  )
+
+# Final AIPW estimate of average treatment effect (ATE)
+mean(treatment_df$aipw, na.rm = TRUE)
