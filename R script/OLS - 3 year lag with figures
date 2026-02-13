@@ -1,0 +1,45 @@
+d_minus_3 = merged_df %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(aid_lag3 = lag(aid_amount, 3)) %>%
+  ungroup()
+
+model3 = feols(
+  fdi ~ aid_lag3 + country_gdp + defense_treaties + investment_treaties + trade_treaties + income_group | country + year,
+  data = d_minus_3
+)
+
+summary(model3)
+
+tidy_model = broom::tidy(model3) %>%
+  filter(term != "(Intercept)") %>%  # remove intercept (optional)
+  mutate(
+    stars = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      p.value < 0.1   ~ ".",
+      TRUE ~ ""
+    ),
+    estimate_fmt = glue("{round(estimate, 3)}{stars}"),
+    se_fmt = glue("({round(std.error, 3)})")
+  )
+
+# 3. Make the GT table
+gt_table = tidy_model %>%
+  select(term, estimate_fmt, se_fmt) %>%
+  rename(
+    Variable = term,
+    Estimate = estimate_fmt,
+    `Std. Error` = se_fmt
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1",
+    subtitle = "Fixed Effects Model with 3-Year Lag"
+  ) %>%
+  cols_align("center", columns = everything()) %>%
+  tab_source_note(md("*Stars: *** p < 0.001, ** p < 0.01, * p < 0.05, . p < 0.1*"))
+
+# 4. Print the table
+gt_table
