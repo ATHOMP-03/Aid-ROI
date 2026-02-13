@@ -1,0 +1,20 @@
+d_minus_1 = merged_df %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(aid_lag1 = lag(aid_amount, 1)) %>%
+  ungroup()
+
+model1 = feols(
+  fdi ~ aid_lag1 + country_gdp + defense_treaties + investment_treaties + trade_treaties + income_group | country + year,
+  data = d_minus_1
+)
+
+summary(model1)
+
+base_model = feols(
+  fdi ~ aid_amount + country_gdp | country + year,
+  data = merged_df
+)
+
+summary(base_model)
+dev.off()
